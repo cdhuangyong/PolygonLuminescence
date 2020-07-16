@@ -1,0 +1,515 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<title></title>
+	<link rel="stylesheet" type="text/css" href="./mapbox-gl.css">
+	<style type="text/css">
+		*{
+			margin: 0;
+			padding: 0;
+			list-style: none;
+		}
+		html,body,#map{
+			width: 100%;
+			height: 100%;
+			overflow: hidden;
+		}
+	</style>
+	<script type="text/javascript" src="./mapbox-gl-dev.js"></script>
+	<script type="text/javascript" src="./earcut.js"></script>
+	<script type="text/javascript" src="./vector3.js"></script>
+	<script type="text/javascript" src="./Program.js"></script>
+	<script type="text/javascript" src="./FBO.js"></script>
+</head>
+<body style="background: black;">
+  <div id="map" ></div>
+</body>
+<script type="text/javascript">
+
+	
+	//mapboxgl.accessToken = 'pk.eyJ1IjoiY2RodWFuZ3lvbmciLCJhIjoiY2p1ZHV2bG9iMDF4azN6bjBieXRkZmZlMyJ9.HeW8E525NqprVUmJxyExmA';
+	var map = new mapboxgl.Map({
+		container: 'map',
+		center: [113.32769385716733,23.07067904838256],
+		zoom: 12,
+		fadeDuration:0,
+		//style:  "mapbox://styles/mapbox/streets-v11",
+		style:{
+			"version":8,
+			"name":"Positron",
+			"metadata":{},
+			//"sprite":"http://10.0.3.96:8085/styles/positron/sprite",
+			//"glyphs":"http://10.0.3.96:8085/fonts/{fontstack}/{range}.pbf",
+			//local
+			//"glyphs":"/static/fonts/{fontstack}/{range}.pbf",
+			//service
+			"glyphs":"fonts/{fontstack}/{range}.pbf",
+			"sources":{},
+			"layers":[]
+		},
+		hash: false,
+	});
+
+	map.on('load', function() {
+
+		(function(){
+
+			var vertexShaderSource = `
+
+				#ifdef GL_FRAGMENT_PRECISION_HIGH
+					precision highp float;
+				#else
+					precision mediump float;
+				#endif
+
+				const float PI = 3.14159265;
+
+				uniform mat4 u_Matrix;
+
+				attribute vec2 a_Position;
+
+				float mercatorXfromLng(float lng ) {
+		            return (180.0 + lng) / 360.0;
+		        }
+
+		        float mercatorYfromLat(float lat) { 
+		          return (180.0 - (180.0 / PI * log(tan(PI / 4.0 + lat * PI / 360.0)))) / 360.0;
+		        }
+
+				void main(){
+
+					vec2 pos = a_Position; 
+
+					float x = mercatorXfromLng(pos.x);
+					float y = mercatorYfromLat(pos.y);
+
+					gl_Position = u_Matrix * vec4( x, y , 0.0 ,1.0 );
+
+				}
+			`;
+
+			var fragmentShaderSource = `
+
+				#ifdef GL_FRAGMENT_PRECISION_HIGH
+					precision highp float;
+				#else
+					precision mediump float;
+				#endif
+
+				void main(){
+
+					gl_FragColor = vec4(1.0,1.0, 0.0, 1.0);
+
+				}
+			`;
+
+			var fbo = null,
+				fbo1 = null,
+				fbo2 = null,
+				program1,
+				program2,
+				program3,
+				program4,
+				program5;
+			
+
+			function gauss_num(){
+
+				function glb_gauss_num( x) {  
+				    var pi = 3.1415927;  
+				    var e = 2.71828;  
+				    var theta = 0.1;  
+				    var theta2 = theta * theta;  
+				    var temp1 = 1.0 / (theta * Math.sqrt(2 * pi));  
+				    var temp2 = Math.pow(e, -(x * x) / 2 * theta2);  
+				    return temp1 * temp2;  
+				}  
+				var g_GaussNum = new Array(21);
+
+				g_GaussNum[0] = 1.0;  
+			    for (var i = 1; i < g_GaussNum.length; i++) {  
+			        g_GaussNum[i] = glb_gauss_num(i);  
+			    }  
+			  
+			    var total = 0.0;  
+			    for (var i = 0; i < g_GaussNum.length; i++) {  
+			        total += g_GaussNum[i];  
+			    }  
+			  
+			    for (var i = 0; i < g_GaussNum.length; i++) {  
+			        g_GaussNum[i] = g_GaussNum[i] / total;  
+			    } 
+			    return g_GaussNum
+			}
+
+
+			map.addLayer({
+				id:"test",
+				type:"custom",
+				onAdd:function(map,gl){
+
+					fbo = new FBO(gl);
+					fbo1 = new FBO(gl);
+					fbo2 = new FBO(gl);
+
+					program1 = new Program({
+						gl:gl,
+						vertexShaderSource:vertexShaderSource,
+						fragmentShaderSource:fragmentShaderSource,
+						attributes:[
+							{name:"a_Position",size: 2}
+						],
+						uniforms:[
+							{
+								name:"u_Matrix"
+							}
+						]
+					});
+
+					program2 = new Program({
+						gl:gl,
+						vertexShaderSource:`
+							#ifdef GL_FRAGMENT_PRECISION_HIGH
+								precision highp float;
+							#else
+								precision mediump float;
+							#endif
+
+							attribute vec2 a_Position;
+							attribute vec2 a_UV;
+							varying vec2 v_UV;
+							void main(){
+								v_UV = a_UV;
+								gl_Position = vec4( a_Position , 0.0 ,1.0 );
+							}
+						`,
+						fragmentShaderSource:`
+							#ifdef GL_FRAGMENT_PRECISION_HIGH
+								precision highp float;
+							#else
+								precision mediump float;
+							#endif
+
+							uniform sampler2D u_Texture;
+							uniform float tex_width;  
+  							uniform float gauss_num[21];
+
+							varying vec2 v_UV;
+							void main(){
+
+								vec4 color = vec4(texture2D(u_Texture, v_UV).rgb,1.0) * gauss_num[0];  
+							    float step = 1.0 / tex_width;  
+							  
+							    for (int i = 1; i < 21; i++) {  
+							        if (v_UV.x - float(i) * step >= 0.0) {  
+							            color += texture2D(u_Texture, vec2(v_UV.x - float(i) * step, v_UV.y)) * gauss_num[i];  
+							        }  
+							        if (v_UV.x + float(i) * step <= 1.0) {  
+							            color += texture2D(u_Texture, vec2(v_UV.x + float(i) * step, v_UV.y)) * gauss_num[i];  
+							        }  
+							    } 
+
+								//vec4 color = texture2D(u_Texture, v_UV);
+								//color.w = 0.5;
+								gl_FragColor = color;
+							}
+						`,
+						attributes:[
+							{name:"a_Position",size:2,data:new Float32Array([-1,-1,1,-1,1,1,-1,1])},
+							{name:"a_UV",size:2,data:new Float32Array([0,0,1,0,1,1,0,1])},
+						],
+						uniforms:[
+							{name:"u_Texture",value:null},
+							{name:"tex_width",value:0},
+							{name:"gauss_num",value:gauss_num(),type:"uniform1fv"}
+						],
+						indexes:[0,1,3,1,3,2]
+					});
+
+					program3 = new Program({
+						gl:gl,
+						vertexShaderSource:`
+							#ifdef GL_FRAGMENT_PRECISION_HIGH
+								precision highp float;
+							#else
+								precision mediump float;
+							#endif
+
+							attribute vec2 a_Position;
+							attribute vec2 a_UV;
+							varying vec2 v_UV;
+							void main(){
+								v_UV = a_UV;
+								gl_Position = vec4( a_Position , 0.0 ,1.0 );
+							}
+						`,
+						fragmentShaderSource:`
+							#ifdef GL_FRAGMENT_PRECISION_HIGH
+								precision highp float;
+							#else
+								precision mediump float;
+							#endif
+
+							uniform sampler2D u_Texture;
+							uniform float tex_height;  
+  							uniform float gauss_num[21];
+
+							varying vec2 v_UV;
+							void main(){
+
+								vec4 color = vec4(texture2D(u_Texture, v_UV).rgb,1.0) * gauss_num[0];
+							    float step = 1.0 / tex_height;  
+							    for (int i = 1; i < 21; i++) {  
+							        if (v_UV.y - float(i) * step >= 0.0) {  
+							            color += texture2D(u_Texture, vec2(v_UV.x, v_UV.y - float(i) * step)) * gauss_num[i];  
+							        }  
+							        if (v_UV.y + float(i) * step <= 1.0) {  
+							            color += texture2D(u_Texture, vec2(v_UV.x, v_UV.y + float(i) * step)) * gauss_num[i];  
+							        }
+							    }
+								gl_FragColor = color;
+							}
+						`,
+						attributes:[
+							{name:"a_Position",size:2,data:new Float32Array([-1,-1,1,-1,1,1,-1,1])},
+							{name:"a_UV",size:2,data:new Float32Array([0,0,1,0,1,1,0,1])},
+						],
+						uniforms:[
+							{name:"u_Texture",value:null},
+							{name:"tex_height",value:0},
+							{name:"gauss_num",value:gauss_num(),type:"uniform1fv"}
+						],
+						indexes:[0,1,3,1,3,2]
+					});
+
+					program4 = new Program({
+						gl:gl,
+						vertexShaderSource:`
+							#ifdef GL_FRAGMENT_PRECISION_HIGH
+								precision highp float;
+							#else
+								precision mediump float;
+							#endif
+
+							attribute vec2 a_Position;
+							attribute vec2 a_UV;
+							varying vec2 v_UV;
+							void main(){
+								v_UV = a_UV;
+								gl_Position = vec4( a_Position , 0.0 ,1.0 );
+							}
+						`,
+						fragmentShaderSource:`
+							#ifdef GL_FRAGMENT_PRECISION_HIGH
+								precision highp float;
+							#else
+								precision mediump float;
+							#endif
+							uniform sampler2D u_Texture;
+							uniform sampler2D u_TextureOrigin;
+							varying vec2 v_UV;
+							void main(){
+								vec4 color = texture2D(u_Texture, v_UV);
+								vec4 colorOrigin = texture2D(u_TextureOrigin,v_UV);
+								if(colorOrigin.a >= 1.0){
+									color.a = 0.0;
+								}
+								if(color.a > 0.0){
+									color.a = 1.0;
+								}else{
+									color.a = 0.0;
+								}
+								gl_FragColor = color;
+							}
+						`,
+						attributes:[
+							{name:"a_Position",size:2,data:new Float32Array([-1,-1,1,-1,1,1,-1,1])},
+							{name:"a_UV",size:2,data:new Float32Array([0,0,1,0,1,1,0,1])},
+						],
+						uniforms:[
+							{name:"u_Texture",value:null},
+							{name:"u_TextureOrigin",value:null}
+						],
+						indexes:[0,1,3,1,3,2]
+					});
+
+					program5 = new Program({
+						gl:gl,
+						vertexShaderSource:`
+							#ifdef GL_FRAGMENT_PRECISION_HIGH
+								precision highp float;
+							#else
+								precision mediump float;
+							#endif
+
+							attribute vec2 a_Position;
+							attribute vec2 a_UV;
+							varying vec2 v_UV;
+							void main(){
+								v_UV = a_UV;
+								gl_Position = vec4( a_Position , 0.0 ,1.0 );
+							}
+						`,
+						fragmentShaderSource:`
+							#ifdef GL_FRAGMENT_PRECISION_HIGH
+								precision highp float;
+							#else
+								precision mediump float;
+							#endif
+							uniform sampler2D u_Texture;
+							uniform sampler2D u_TextureOrigin;
+							varying vec2 v_UV;
+							void main(){
+								vec4 color = texture2D(u_Texture, v_UV);
+								vec4 colorOrigin = texture2D(u_TextureOrigin,v_UV);
+								
+								if(colorOrigin.a < 1.0){
+									color.a = 0.0;
+								}
+
+								gl_FragColor = color;
+							}
+						`,
+						attributes:[
+							{name:"a_Position",size:2,data:new Float32Array([-1,-1,1,-1,1,1,-1,1])},
+							{name:"a_UV",size:2,data:new Float32Array([0,0,1,0,1,1,0,1])},
+						],
+						uniforms:[
+							{name:"u_Texture",value:null},
+							{name:"u_TextureOrigin",value:null}
+						],
+						indexes:[0,1,3,1,3,2]
+					});
+
+
+					fetch("./haizhuqu.json").then((response)=>{
+						return response.json()
+					}).then((data)=>{
+
+						var features = data.features;
+						var feature = features[0];
+						var geometry = feature.geometry;
+						var type = geometry.type;
+						var coordinates = geometry.coordinates[0];
+						var data ;
+	
+						coordinates.push([
+							[113.31079387971442,23.090657713604713],
+							[113.3477036638721,23.090149437582795],
+							[113.32228674662133,23.06798673469794]
+						])
+
+						data  = earcut.flatten(coordinates);
+						var len = data.vertices.length;
+
+						program1.bufferData("a_Position",data.vertices);
+
+						var trianglesIndexes = earcut(data.vertices,data.holes,data.dimensions);
+						program1.indexes(trianglesIndexes);
+						map.triggerRepaint();
+
+					});
+
+				},
+
+				render:function(gl, matrix){
+
+					//后期渲染原始图像
+					gl.enable(gl.BLEND);
+					fbo.bind();
+					gl.clearColor(0, 0, 0, 0);
+    				gl.clear(gl.COLOR_BUFFER_BIT);
+					program1.use();
+					program1.uniforms["u_Matrix"].value = matrix;
+					program1.render();
+					fbo.unbind();
+
+					//x方向模糊渲染
+					fbo1.bind();
+					//gl.enable(gl.BLEND);
+					gl.clearColor(0, 0, 0, 0);
+    				gl.clear(gl.COLOR_BUFFER_BIT);
+					program2.use();
+					gl.activeTexture(gl.TEXTURE0);
+					gl.bindTexture(gl.TEXTURE_2D, fbo.texture );
+					gl.uniform1i( program2.uniforms["u_Texture"].loc,0);
+				    program2.uniforms["tex_width"].value = gl.drawingBufferWidth;
+    				program2.render();
+					fbo1.unbind();
+
+					//y方向模糊渲染
+					fbo2.bind();
+					//gl.enable(gl.BLEND);
+					gl.clearColor(0, 0, 0, 0);
+    				gl.clear(gl.COLOR_BUFFER_BIT);
+					program3.use();
+					gl.activeTexture(gl.TEXTURE0);
+				    gl.bindTexture(gl.TEXTURE_2D, fbo1.texture );
+				    gl.uniform1i( program3.uniforms["u_Texture"].loc,0);
+				    program3.uniforms["tex_height"].value = gl.drawingBufferHeight;
+    				program3.render();
+				    fbo2.unbind();
+
+				    //剔除实心外发光模糊片段
+				 	 //gl.enable(gl.BLEND);
+					//gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+				 	fbo1.bind();
+					gl.clearColor(0, 0, 0, 0);
+    				gl.clear(gl.COLOR_BUFFER_BIT);
+				 	program4.use();
+				    gl.activeTexture(gl.TEXTURE0);
+				    gl.bindTexture(gl.TEXTURE_2D, fbo2.texture );
+				    gl.uniform1i( program4.uniforms["u_Texture"].loc,0);
+				    gl.activeTexture(gl.TEXTURE1);
+				    gl.bindTexture(gl.TEXTURE_2D, fbo.texture );
+				    gl.uniform1i( program4.uniforms["u_TextureOrigin"].loc,1);
+				    program4.render();
+				    fbo1.unbind();
+
+		   			//再次x方向模糊渲染
+					fbo2.bind();
+					gl.clearColor(0, 0, 0, 0);
+    				gl.clear(gl.COLOR_BUFFER_BIT);
+					program2.use();
+					gl.activeTexture(gl.TEXTURE0);
+					gl.bindTexture(gl.TEXTURE_2D, fbo1.texture );
+					gl.uniform1i( program2.uniforms["u_Texture"].loc,0);
+				    program2.uniforms["tex_width"].value = gl.drawingBufferWidth;
+    				program2.render();
+					fbo2.unbind();
+
+					// 再次y方向模糊渲染
+					fbo1.bind();
+					gl.clearColor(0, 0, 0, 0);
+    				gl.clear(gl.COLOR_BUFFER_BIT);
+					program3.use();
+					gl.activeTexture(gl.TEXTURE0);
+				    gl.bindTexture(gl.TEXTURE_2D, fbo2.texture );
+				    gl.uniform1i( program3.uniforms["u_Texture"].loc,0);
+				    program3.uniforms["tex_height"].value = gl.drawingBufferHeight;
+    				program3.render();
+    				fbo1.unbind();
+
+    				//最后剔除外部模糊部分
+    	 			gl.blendFuncSeparate(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    				program5.use();
+				    gl.activeTexture(gl.TEXTURE0);
+				    gl.bindTexture(gl.TEXTURE_2D, fbo1.texture );
+				    gl.uniform1i( program5.uniforms["u_Texture"].loc,0);
+
+				    gl.activeTexture(gl.TEXTURE1);
+				    gl.bindTexture(gl.TEXTURE_2D, fbo.texture );
+				    gl.uniform1i( program5.uniforms["u_TextureOrigin"].loc,1);
+				    program5.render();
+
+
+				}
+			})
+		})();
+
+	});
+
+
+
+</script>
+</html>
